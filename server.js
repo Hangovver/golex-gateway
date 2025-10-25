@@ -1,82 +1,82 @@
+'use strict';
+
+/**
+ * GOLEX Gateway — server.js (FULL FILE)
+ * - Public: GET /health, GET /
+ * - Protected: all other API routes via APP_CLIENT_TOKEN header (x-golex-client)
+ * - CORS: * with GET/OPTIONS + needed headers
+ */
+
 const express = require('express');
-const axios = require('axios');
+const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
-const NodeCache = require('node-cache');
-const cors = require('cors');
-
-const app = express();
-app.use(express.json());
-
-const API_KEY = process.env.API_FOOTBALL_KEY;
-const APP_CLIENT_TOKEN = process.env.APP_CLIENT_TOKEN;
-const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
-const CACHE_TTL = parseInt(process.env.CACHE_TTL || '30', 10);
-const RL_WINDOW_MS = parseInt(process.env.RL_WINDOW_MS || '60000', 10);
-const RL_MAX = parseInt(process.env.RL_MAX || '60', 10);
-
-if (!API_KEY) {
-  console.error('ERROR: API_FOOTBALL_KEY env değişkenini set etmelisin.');
-  process.exit(1);
-}
-
-app.use(cors({ origin: CORS_ORIGIN }));
-app.use(rateLimit({ windowMs: RL_WINDOW_MS, max: RL_MAX }));
-
-app.use((req, res, next) => {
-  if (!APP_CLIENT_TOKEN) return next();
-  const hdr = req.header('x-golex-client');
-  if (hdr && hdr === APP_CLIENT_TOKEN) return next();
-  return res.status(401).json({ error: 'unauthorized' });
-});
-
-const BASE = 'https://v3.football.api-sports.io';
-const cache = new NodeCache({ stdTTL: CACHE_TTL });
-
-async function proxyGet(path, params) {
-  const key = path + JSON.stringify(params || {});
-  const hit = cache.get(key);
-  if (hit) return hit;
-
-  const { data } = await axios.get(BASE + path, {
-    params,
-    headers: { 'x-apisports-key': API_KEY }
-  });
-  cache.set(key, data);
-  return data;
-}
-
-app.get('/', (req, res) => res.send('GOLEX gateway ok'));
-app.get('/health', (req, res) => res.json({ ok: true }));
-
-app.get('/leagues', async (req, res) => {
-  try { res.json(await proxyGet('/leagues', req.query)); }
-  catch(e){ res.status(500).json({ error: e.message }); }
-});
-
-app.get('/fixtures', async (req, res) => {
-  try { res.json(await proxyGet('/fixtures', req.query)); }
-  catch(e){ res.status(500).json({ error: e.message }); }
-});
-
-app.get('/teams', async (req, res) => {
-  try { res.json(await proxyGet('/teams', req.query)); }
-  catch(e){ res.status(500).json({ error: e.message }); }
-});
-
-app.get('/standings', async (req, res) => {
-  try { res.json(await proxyGet('/standings', req.query)); }
-  catch(e){ res.status(500).json({ error: e.message }); }
-});
-
-app.get('/events', async (req, res) => {
-  try { res.json(await proxyGet('/fixtures/events', req.query)); }
-  catch(e){ res.status(500).json({ error: e.message }); }
-});
-
-app.get('/odds', async (req, res) => {
-  try { res.json(await proxyGet('/odds', req.query)); }
-  catch(e){ res.status(500).json({ error: e.message }); }
-});
+const { URLSearchParams } = require('url');
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('listening on ' + PORT));
+const API_KEY = process.env.API_FOOTBALL_KEY || '';
+const APP_CLIENT_TOKEN = process.env.APP_CLIENT_TOKEN || '';
+const RL_MAX = parseInt(process.env.RL_MAX || '120', 10);
+const RL_WINDOW_MS = parseInt(process.env.RL_WINDOW_MS || '60000', 10);
+const APISPORTS_BASE = process.env.APISPORTS_BASE || 'https://v3.football.api-sports.io';
+
+if (!process.env.API_FOOTBALL_KEY) {
+  console.warn('[WARN] API_FOOTBALL_KEY is empty — upstream calls will fail.');
+}
+
+const app = express();
+app.disable('x-powered-by');
+app.use(morgan('tiny'));
+
+// 1) CORS (open but minimal)
+const corsAll = require('./server/node/cors-all');
+app.use(corsAll);
+
+// 2) Public routes
+app.get('/health', (req, res) => res.json({ ok: true }));
+app.get('/', (req, res) => res.json({ ok: true, service: 'golex-gateway' }));
+
+// 3) Auth guard for the rest (skip preflight + public)
+const check = require('./server/node/checkAppClientToken');
+app.use(check(APP_CLIENT_TOKEN));
+
+// 4) Basic rate limit
+app.use(rateLimit({
+  windowMs: RL_WINDOW_MS,
+  max: RL_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+}));
+
+// 5) Example: proxy /fixtures to API-Sports
+app.get('/fixtures', async (req, res) => {
+  try {
+    if (!API_KEY) {
+      return res.status(500).json({ ok: false, error: 'missing_api_key' });
+    }
+    const qs = new URLSearchParams(req.query).toString();
+    const url = `${APISPORTS_BASE}/fixtures${qs ? `?${qs}` : ''}`;
+
+    const upstream = await fetch(url, {
+      headers: {
+        'x-apisports-key': API_KEY,
+        'accept': 'application/json',
+      },
+    });
+
+    const text = await upstream.text();
+    res
+      .status(upstream.status)
+      .set('content-type', upstream.headers.get('content-type') || 'application/json')
+      .send(text);
+
+  } catch (err) {
+    res.status(502).json({ ok: false, error: 'upstream_error', detail: String(err && err.message || err) });
+  }
+});
+
+// TODO: Add more routes similarly, e.g. /events, /odds ...
+
+// 6) Listen
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[GOLEX] gateway up on :${PORT}`);
+});
