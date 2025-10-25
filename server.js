@@ -59,8 +59,8 @@ app.get('/fixtures', async (req, res) => {
     const upstream = await fetch(url, {
       headers: {
         'x-apisports-key': API_KEY,
-        'accept': 'application/json',
-      },
+        'accept': 'application/json'
+      }
     });
 
     const text = await upstream.text();
@@ -70,7 +70,7 @@ app.get('/fixtures', async (req, res) => {
       .send(text);
 
   } catch (err) {
-    res.status(502).json({ ok: false, error: 'upstream_error', detail: String(err && err.message || err) });
+    res.status(502).json({ ok: false, error: 'upstream_error', detail: String((err && err.message) || err) });
   }
 });
 
